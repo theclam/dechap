@@ -1,13 +1,14 @@
-dechap v0.2 Alpha
-Written by Foeh Mannay, January 2013
+dechap v0.3 Alpha
+Written by Foeh Mannay, September 2013
 
 PURPOSE
 =======
 
 dechap is a tool which attempts to recover login credentials from captured
-PPPoE, RADIUS and L2TP CHAP authentications. It strips away any 802.1Q tags
-and / or MPLS labels which are present to get to the CHAP and then runs a
-dictionary attack against any authentications it finds.
+PPPoE, RADIUS and L2TP CHAP authentications or MD5 authenticated OSPF traffic.
+It strips away any 802.1Q tags and / or MPLS labels which are present to get to
+the good stuff and then runs a dictionary attack against any authentications it
+finds.
 
 Please see http://networkingbodges.blogspot.com/ for more information on the
 theory behind this if you are interested.
@@ -31,6 +32,7 @@ Unable to find a password for user user2@testisp.com.
 Found password "password1" for user user3@testisp.com.
 Found password "Africa" for user user4@testisp.com.
 Found password "Frankenstein" for user user5@testisp.com.
+Found password "s3cr3tk3y" for OSPF host 10.1.1.1 key 1.
 lab@lab:~/dechap$
 
 CHANGE LOG
@@ -41,4 +43,5 @@ v0.1a	First working release, only works with PPPoE traffic.
 v0.2a	Added support for RADIUS and L2TP captures.
 	Fixed a bug in MPLS decap.
 
+v0.3a	Added support for MD5 authenticated OSPF.
 
