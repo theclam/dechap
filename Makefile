@@ -1,5 +1,5 @@
 CC=gcc
-CFLAGS=-lssl
+CFLAGS=-lcrypto
 
 all:
 	$(CC) $(CFLAGS) dechap.c -o dechap
