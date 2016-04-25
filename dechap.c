@@ -5,10 +5,11 @@
 
 #include "dechap.h"
 
-#define SWVERSION "v0.2 alpha"
-#define SWRELEASEDATE "January 2013"
+#define SWVERSION "v0.3 alpha"
+#define SWRELEASEDATE "September 2013"
 
-// "dechap" attempts to recover credentials from packet captures of PPPoE, RADIUS or L2TP CHAP authentications.
+// "dechap" attempts to recover credentials from packet captures of PPPoE, RADIUS and L2TP CHAP authentications.
+// It can also now work with OSPFv2 packets :)
 // Written by Foeh Mannay
 // Please refer to http://networkbodges.blogspot.com for more information about this tool.
 // This software is released under the Modified BSD license.
@@ -84,6 +85,7 @@ auth_instance_t *decap(char *data, unsigned int length, char type, auth_instance
 			if(memcmp(data+12, "\x08\x00",2) == 0){
 				return(decap(data + 14, length - 14, IPv4, ai));
 			}
+			return(NULL);
 		break;
 		case VLAN:
 			if(length < 4) return(NULL);
@@ -106,6 +108,12 @@ auth_instance_t *decap(char *data, unsigned int length, char type, auth_instance
 			if(memcmp(data+2, "\x88\x64", 2) == 0){
 				return(decap(data + 4, length - 4, PPPoE, ai));
 			}
+                        // IP next?
+                        if(memcmp(data+2, "\x08\x00", 2) == 0){
+                                return(decap(data + 4, length - 4, IPv4, ai));
+                        }
+			return(NULL);
+
 		break;
 		case MPLS:
 			if(length < 4) return(NULL);
@@ -181,10 +189,56 @@ auth_instance_t *decap(char *data, unsigned int length, char type, auth_instance
 			if(length < 20) return(NULL);
 			if(length < 4 * (data[0] & 15)) return(NULL);
 			
-			if(data[9] == '\x11'){
+			if(data[9] == '\x11'){	// UDP
 				return(decap(data + (4 * (data[0] & 15)), length - (4 * (data[0] & 15)), UDP, ai));
-			} else return(NULL);
+			} 
+
+			if(data[9] == '\x59'){	//OSPFv2
+				ai->ip_ptr = data;
+				return(decap(data + (4 * (data[0] & 15)), length - (4 * (data[0] & 15)), OSPFv2, ai));
+                        }
+ 
+			return(NULL);
+
 		break;
+		case OSPFv2:
+			// If the protocol is OSPF IGP, check for version 2 packets with MD5 auth.
+			if(length < 24) return(NULL);		// Must have full header
+			if(data[0] != '\x02') return(NULL); 	// OSPF version check
+			if(memcmp(data + 12, "\x00\x00\x00\x02",4) != 0) return(NULL); // Not MD5 auth
+			vlen = (((unsigned char)data[2]) * 256 + (unsigned char)data[3]);
+			if(length < (vlen + (unsigned char)data[19])) return(NULL);	// Header lies!
+			
+			// Assuming the OSPF is sane, grab a copy of the packet contents
+			ai->cr = PLAIN_MD5;
+			ai->challenge_data = (char*)malloc(vlen);
+			if(ai->challenge_data == NULL){
+				printf("Error! Could not allocate memory for OSPF packet data!\n");
+				return(NULL);
+			}
+			memcpy(ai->challenge_data, data, vlen);
+			ai->length = vlen;
+			// Now save a copy of the resulting hash
+			ai->response_data = (char*)malloc((unsigned char)data[19]);
+			if(ai->response_data == NULL){
+				printf("Error! Could not allocate memory for OSPF packet data!\n");
+				return(NULL);
+			}
+			memcpy(ai->response_data, data + vlen, (unsigned char)data[19]);
+			ai->username = (char*)malloc(40);
+			if(ai->username == NULL){
+				printf("Error! Could not allocate memory for hostname!\n");
+				return(NULL);
+			}
+			// Set the username to indicate the IP of the sending router and the key ID
+			snprintf(ai->username, 39, "OSPF host %u.%u.%u.%u key %u", 
+				(unsigned char)ai->ip_ptr[12],
+				(unsigned char)ai->ip_ptr[13],
+				(unsigned char)ai->ip_ptr[14],
+				(unsigned char)ai->ip_ptr[15],
+				(unsigned char)data[18]);
+			return(ai);
+
 		case UDP:
 			// If the protocol is UDP, check for RADIUS / L2TP port numbers
 			if(length < 8) return(NULL);
@@ -352,7 +406,7 @@ auth_list_item_t *node(auth_instance_t *item){
 	return(n);
 }
 
-puzzle_t *addpuzzle(puzzle_t *root, auth_list_item_t *challenge, auth_list_item_t *response){
+puzzle_t *addpuzzle(puzzle_t *root, auth_list_item_t *challenge, auth_list_item_t *response, char type){
 // Generates a puzzle from a challenge / response pair and appends it to the list of puzzles.
 	puzzle_t *current;
 	puzzle_t *newnode = (puzzle_t*)malloc(sizeof(puzzle_t));
@@ -369,6 +423,7 @@ puzzle_t *addpuzzle(puzzle_t *root, auth_list_item_t *challenge, auth_list_item_
 	newnode->response = response->item->response_data;
 	newnode->username = response->item->username;
 	newnode->password = NULL;
+	newnode->type = type;
 	
 	if(root == NULL) return(newnode);
 	for(current = root; current->next != NULL; current = current->next);
@@ -388,10 +443,15 @@ puzzle_t *pair_up(auth_list_item_t *chaps){
 	// ID and authentication ID.
 	for(response = chaps; response != NULL; response = response->next){
 		
+		if(response->item->cr == PLAIN_MD5){
+			challenge = response;
+			puzzles = addpuzzle(puzzles, challenge, response, PLAIN_MD5);
+			continue;
+		}
 		if(response->item->cr == CHAP_CHALLENGE) continue;
 		if(response->item->cr == CHAP_BOTH){
 			challenge = response;
-			puzzles = addpuzzle(puzzles, challenge, response);
+			puzzles = addpuzzle(puzzles, challenge, response, CHAP);
 			continue;
 		}
 		for(challenge = response; challenge != NULL; challenge = challenge->prev){
@@ -409,7 +469,7 @@ puzzle_t *pair_up(auth_list_item_t *chaps){
 		if(challenge == NULL) continue;
 		
 		// If we did find a match, create an entry in our list of hashes.
-		puzzles = addpuzzle(puzzles, challenge, response);
+		puzzles = addpuzzle(puzzles, challenge, response, CHAP);
 	}
 	return(puzzles);
 }
@@ -503,28 +563,44 @@ void crack(puzzle_t *puzzles, FILE *wordfile){
  
 	puzzle_t			*currentpuzzle = NULL;
 	char				*password = (char*)malloc(256),
-						tuple[512],
+						*base,
 						hash[16];
 	int					pwlen = 0;
 
 	for(currentpuzzle = puzzles; currentpuzzle != NULL; currentpuzzle = currentpuzzle->next){
+		base = (char*)malloc(currentpuzzle->length + 257);
 		rewind(wordfile);
 		while(feof(wordfile) == 0){
 			if(fgets(password, 255, wordfile) == NULL) break;
 			pwlen = strlen(password);
 			if(pwlen > 0 && password[pwlen-1] == '\n') password[pwlen-1] = '\x00';
-			// Next job is to concatenate the auth ID with the plaintext password and the challenge data:
-			tuple[0] = (char)currentpuzzle->authid;
-			strcpy(tuple+1, password);
-			memcpy(tuple+pwlen, currentpuzzle->challenge, currentpuzzle->length);
-			// Obtain the MD5 hash of this and compare it to the one in the CHAP response:
-			MD5(tuple, pwlen + currentpuzzle->length , hash);
-			if(memcmp(hash, currentpuzzle->response, 16) == 0){
-				printf("Found password \"%s\" for user %s.\n", password, currentpuzzle->username);
-				currentpuzzle->password = strdup(password);
+			if(currentpuzzle->type == CHAP){
+				// Next job is to concatenate the auth ID with the plaintext password and the challenge data:
+				base[0] = (char)currentpuzzle->authid;
+				strcpy(base+1, password);
+				memcpy(base+pwlen, currentpuzzle->challenge, currentpuzzle->length);
+				// Obtain the MD5 hash of this and compare it to the one in the CHAP response:
+				MD5(base, pwlen + currentpuzzle->length , hash);
+				if(memcmp(hash, currentpuzzle->response, 16) == 0){
+					printf("Found password \"%s\" for user %s.\n", password, currentpuzzle->username);
+					currentpuzzle->password = strdup(password);
+					break;
+				}
+			} else if(currentpuzzle->type == PLAIN_MD5){
+				// Hash is run against the packet contents, plus a zero padded password field of exactly 16 bytes length
+				memcpy(base, currentpuzzle->challenge, currentpuzzle->length);
+				memcpy(base+currentpuzzle->length, "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00", 16);
+				strcpy(base+currentpuzzle->length, password);
+				MD5(base, 16 + currentpuzzle->length, hash);
+				if(memcmp(hash, currentpuzzle->response, 16) == 0){
+					printf("Found password \"%s\" for user %s.\n", password, currentpuzzle->username);
+					currentpuzzle->password = strdup(password);
+					break;
+				}
 			}
 		}
 		if(currentpuzzle->password == NULL) printf("Unable to find a password for user %s.\n", currentpuzzle->username);
+		free(base);
 	}
 }
 

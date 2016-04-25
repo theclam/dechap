@@ -14,7 +14,8 @@
 #define RADAVP '\x0a'
 #define L2TP '\x0b'
 #define L2AVP '\x0c'
-
+#define OSPFv2 '\x0d'
+#define PLAIN_MD5 '\x0e'
 
 typedef struct auth_instance_s {
 // A data structure to hold the details necessary to uniquely identify an authentication instance.
@@ -29,6 +30,7 @@ typedef struct auth_instance_s {
 	char	*challenge_data;
 	char	*response_data;
 	char	*username;
+	char	*ip_ptr;
 } auth_instance_t;
 
 typedef struct auth_list_item_s {
@@ -47,6 +49,7 @@ typedef struct puzzle_s {
 	char			*response;
 	char			*username;
 	char			*password;
+	char			type;
 } puzzle_t;
 
 typedef unsigned int guint32;
