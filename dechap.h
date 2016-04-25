@@ -1,26 +1,36 @@
-#define CHAP_NONE '\x00'
-#define CHAP_CHALLENGE '\x01'
-#define CHAP_RESPONSE '\x02'
-#define CHAP_BOTH '\x03'
-#define ETHERNET '\x01'
-#define VLAN '\x02'
-#define MPLS '\x03'
-#define PPPoE '\x04'
-#define PPP '\x05'
-#define CHAP '\x06'
-#define IPv4 '\x07'
-#define UDP '\x08'
-#define RADIUS '\x09'
-#define RADAVP '\x0a'
-#define L2TP '\x0b'
-#define L2AVP '\x0c'
-#define OSPFv2 '\x0d'
-#define OSPF_MD5 '\x0e'
-#define TCP '\x0f'
-#define IP_MD5 '\x10'
+#ifndef _DECHAP_H_
+#define _DECHAP_H_
+
+#define CHAP_NONE       '\x00'
+#define CHAP_CHALLENGE  '\x01'
+#define CHAP_RESPONSE   '\x02'
+#define CHAP_BOTH       '\x03'
+
+#define ETHERNET        '\x01'
+#define VLAN            '\x02'
+#define MPLS            '\x03'
+#define PPPoE           '\x04'
+#define PPP             '\x05'
+#define CHAP            '\x06'
+#define IPv4            '\x07'
+#define UDP             '\x08'
+#define RADIUS          '\x09'
+#define RADAVP          '\x0a'
+#define L2TP            '\x0b'
+#define L2AVP           '\x0c'
+#define OSPFv2          '\x0d'
+#define OSPF_MD5        '\x0e'
+#define TCP             '\x0f'
+
+#define IP_MD5          '\x10'
+
+
+/** 
+ * A data structure to hold the details necessary 
+ * to uniquely identify an authentication instance.
+**/
 
 typedef struct auth_instance_s {
-// A data structure to hold the details necessary to uniquely identify an authentication instance.
 	char 	smac[6];
 	char 	dmac[6];
 	int		svlan;
@@ -35,15 +45,24 @@ typedef struct auth_instance_s {
 	char	*ip_ptr;
 } auth_instance_t;
 
+/* 
+ * A node for creating linked lists of 
+ * authentication instances
+**/
+
 typedef struct auth_list_item_s {
-// A node for creating linked lists of authentication instances
 	struct auth_list_item_s	*next;
 	struct auth_list_item_s	*prev;
 	auth_instance_t			*item;
 } auth_list_item_t;
 
+
+/* 
+ * A node for creating linked lists of 
+ * challenge / response pairs
+**/
+
 typedef struct puzzle_s {
-// A node for creating linked lists of challenge / response pairs
 	struct puzzle_s	*next;
 	int				authid;
 	int				length;
@@ -79,3 +98,4 @@ typedef struct params_s {
 	char *wordfile;
 } params_t;
 
+#endif
