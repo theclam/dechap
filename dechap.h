@@ -1,12 +1,19 @@
 #define CHAP_NONE '\x00'
 #define CHAP_CHALLENGE '\x01'
 #define CHAP_RESPONSE '\x02'
+#define CHAP_BOTH '\x03'
 #define ETHERNET '\x01'
 #define VLAN '\x02'
 #define MPLS '\x03'
 #define PPPoE '\x04'
 #define PPP '\x05'
 #define CHAP '\x06'
+#define IPv4 '\x07'
+#define UDP '\x08'
+#define RADIUS '\x09'
+#define RADAVP '\x0a'
+#define L2TP '\x0b'
+#define L2AVP '\x0c'
 
 
 typedef struct auth_instance_s {
@@ -19,7 +26,8 @@ typedef struct auth_instance_s {
 	int		authid;
 	char	cr;
 	int		length;
-	char	*data;
+	char	*challenge_data;
+	char	*response_data;
 	char	*username;
 } auth_instance_t;
 

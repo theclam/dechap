@@ -5,10 +5,10 @@
 
 #include "dechap.h"
 
-#define SWVERSION "v0.1 alpha"
+#define SWVERSION "v0.2 alpha"
 #define SWRELEASEDATE "January 2013"
 
-// "dechap" attempts to recover credentials from packet captures of PPPoE CHAP authentications.
+// "dechap" attempts to recover credentials from packet captures of PPPoE, RADIUS or L2TP CHAP authentications.
 // Written by Foeh Mannay
 // Please refer to http://networkbodges.blogspot.com for more information about this tool.
 // This software is released under the Modified BSD license.
@@ -48,11 +48,12 @@ params_t *parseParams(int argc, char *argv[]){
 	return(parameters);
 }
 
-auth_instance_t *decap(char *data, int length, char type, auth_instance_t *ai){
+auth_instance_t *decap(char *data, unsigned int length, char type, auth_instance_t *ai){
 // The decap() function takes in a  pointer to a (partial) frame, the size of the 
 // data, a hint indicating the encap type and a pointer to an authentication instance
 // template which is populated as the various layers of encap are stripped away.
 	int chaplen = 0;
+	int vlen = 0;
 
 	// Some sanity checks
 	if(data == NULL) return(NULL);
@@ -78,6 +79,10 @@ auth_instance_t *decap(char *data, int length, char type, auth_instance_t *ai){
 			// PPPoE session data next?
 			if(memcmp(data+12, "\x88\x64", 2) == 0){
 				return(decap(data + 14, length - 14, PPPoE, ai));
+			}
+			// IP next?
+			if(memcmp(data+12, "\x08\x00",2) == 0){
+				return(decap(data + 14, length - 14, IPv4, ai));
 			}
 		break;
 		case VLAN:
@@ -105,8 +110,14 @@ auth_instance_t *decap(char *data, int length, char type, auth_instance_t *ai){
 		case MPLS:
 			if(length < 4) return(NULL);
 			// Check bottom of stack bit to decide whether to keep stripping MPLS or try for Ethernet
-			if(data[2] & 1 == 0) return(decap(data + 4, length - 4, MPLS, ai));	// Not BOS, more MPLS
-			else return(decap(data + 4, length - 4, ETHERNET, ai));				// BOS - try for Ethernet
+			if((data[2] & '\x01') == 0){
+				return(decap(data + 4, length - 4, MPLS, ai));		// Not BOS, more MPLS
+			}
+			if(length > 4 && (data[4] & '\xf0') == '\x40'){
+				return(decap(data + 4, length - 4, IPv4, ai));		// BOS, presume IPv4
+			} else { 
+				return(decap(data + 4, length - 4, ETHERNET, ai));	// BOS - try for Ethernet
+			}
 		break;
 		case PPPoE:
 			// Only a PPP header can follow a PPPoE session header
@@ -132,12 +143,12 @@ auth_instance_t *decap(char *data, int length, char type, auth_instance_t *ai){
 					ai->authid = data[1];
 					ai->cr = CHAP_CHALLENGE;
 					ai->length = data[4];
-					ai->data = (char*)malloc(ai->length);
-					if(ai->data == NULL){
+					ai->challenge_data = (char*)malloc(ai->length);
+					if(ai->challenge_data == NULL){
 						printf("Could not malloc %u bytes for CHAP challenge data!\n",ai->length);
 						return(NULL);
 					}
-					memcpy(ai->data, data + 5, ai->length);
+					memcpy(ai->challenge_data, data + 5, ai->length);
 					return(ai);
 				break;
 				case CHAP_RESPONSE:		// If it's a response:
@@ -145,12 +156,12 @@ auth_instance_t *decap(char *data, int length, char type, auth_instance_t *ai){
 					ai->authid = data[1];
 					ai->cr = CHAP_RESPONSE;
 					ai->length = data[4];	// Should always be 16 but why take chances?
-					ai->data = (char*)malloc(ai->length);
-					if(ai->data == NULL){
+					ai->response_data = (char*)malloc(ai->length);
+					if(ai->response_data == NULL){
 						printf("Could not malloc %u bytes for CHAP response data!\n",ai->length);
 						return(NULL);
 					}
-					memcpy(ai->data, data + 5, ai->length);
+					memcpy(ai->response_data, data + 5, ai->length);
 					chaplen = (256 * data[2]) + data[3];
 					ai->username = (char*)malloc(chaplen - (ai->length + 4));
 					if(ai->username == NULL){
@@ -164,6 +175,139 @@ auth_instance_t *decap(char *data, int length, char type, auth_instance_t *ai){
 				default:			// We have no interest in success or failure messages as there is nothing to attack.
 					return(NULL);
 			}
+		break;
+		case IPv4:
+			// If the protocol is IPv4 we may find some UDP RADIUS / L2TP messages
+			if(length < 20) return(NULL);
+			if(length < 4 * (data[0] & 15)) return(NULL);
+			
+			if(data[9] == '\x11'){
+				return(decap(data + (4 * (data[0] & 15)), length - (4 * (data[0] & 15)), UDP, ai));
+			} else return(NULL);
+		break;
+		case UDP:
+			// If the protocol is UDP, check for RADIUS / L2TP port numbers
+			if(length < 8) return(NULL);
+			
+			if(memcmp(data + 2, "\x07\x14",2) == 0){	// RADIUS port 1812
+				return(decap(data + 8, length - 8, RADIUS, ai));
+			} else if(memcmp(data + 2, "\x06\xa5",2) == 0){
+				return(decap(data + 8, length - 8, L2TP, ai));
+			} else return(NULL);
+		break;
+		case RADIUS:
+			// If a RADIUS access request packet is found, we can try for a challenge / reponse pair.
+			if(length < 20) return(NULL);						// Must be large enough for a full RADIUS header
+			if(data[0] != '\x01') return(NULL);					// Only interested in Access-Requests
+			vlen = (256*(unsigned char)data[2])+(unsigned char)data[3];
+			if(vlen > length) return(NULL);	// If the header says length > remaining data, bail out
+			
+			return(decap(data + 20, vlen - 20, RADAVP, ai));
+		break;
+		case RADAVP:
+			// Work through the RADIUS AVPs to try and gather auths.
+			if(length < 2 || (char)data[1] > length){
+				// If we are at the end but we have an authentication, return it.
+				if(ai->challenge_data != NULL && ai->response_data != NULL){
+					ai->cr = CHAP_BOTH;
+					return(ai);
+				} else return(NULL);
+			}
+			vlen = (unsigned char)data[1] - 2;
+			switch(data[0]){
+				case '\x03':		// CHAP response data
+					ai->authid = data[2];
+					ai->response_data = (char*)malloc(vlen);
+					if(ai->response_data == NULL){
+						printf("Error! Could not allocate memory for CHAP response data!\n");
+						return(NULL);
+					}
+					memcpy(ai->response_data, data + 3, vlen - 1);
+				break;
+				case '\x01':		// Username
+					ai->username = (char*)malloc(vlen + 1);
+					if(ai->username == NULL){
+						printf("Error! Could not allocate memory for username!\n");
+						return(NULL);
+					}
+					memcpy(ai->username, data + 2, vlen);
+					ai->username[vlen]='\x00';	// Don't forget to null terminate it.
+				break;
+				case '\x3c':		// CHAP challenge data
+					ai->challenge_data = (char*)malloc(vlen);
+					if(ai->challenge_data == NULL){
+						printf("Error! Could not allocate memory for CHAP challenge data!\n");
+						return(NULL);
+					}
+					memcpy(ai->challenge_data, data + 2, vlen);
+					ai->length = vlen;
+				break;
+			}
+			return(decap(data + vlen + 2, length - (vlen + 2), RADAVP, ai));
+		break;
+		case L2TP:
+			// If we get an L2TP ICCN packet, it may contain a CHAP authentication.
+			if(length < 12) return(NULL);
+			if((data[1] & '\x0f') != '\x02' || data[0] & '\xcb' != '\xc8') return(NULL);
+			vlen = (256*(unsigned char)data[2])+(unsigned char)data[3];
+			if(vlen > length) return(NULL);	// If the header says length > remaining data, bail out
+			
+			return(decap(data + 12, vlen - 12, L2AVP, ai));
+		break;
+		case L2AVP:
+			// Work through the L2TP AVPs to try and gather auths.
+			if(length < 6){
+				// If we are at the end but we have an authentication, return it.
+				if(ai->challenge_data != NULL && ai->response_data != NULL){
+					ai->cr = CHAP_BOTH;
+					return(ai);
+				} else return(NULL);
+			}
+			vlen = (256 * ((unsigned char)data[0] & 3)) + (unsigned char)data[1];
+			if(vlen > length) return(NULL);
+			
+			// If this isn't a reserved AVP, we're not interested.
+			if(memcmp(data + 2, "\x00\x00\x00", 3) != 0) return(decap(data + vlen, length - vlen, L2AVP, ai));
+			
+			switch(data[5]){
+				case '\x00':		// Control message type
+					// CHAP should only be in an ICCN message, so abandon anything else
+					if(memcmp(data + 6, "\x00\x0c", 2) != 0){
+						return(NULL);
+					}
+				break;
+				case '\x1e':		// Username
+					ai->username = (char*)malloc(vlen - 5);
+					if(ai->username == NULL){
+						printf("Error! Could not allocate memory for username!\n");
+						return(NULL);
+					}
+					memcpy(ai->username, data + 6, vlen - 6);
+					ai->username[vlen-6]='\x00';	// Don't forget to null terminate it.
+				break;
+				case '\x1f':		// CHAP challenge data
+					ai->challenge_data = (char*)malloc(vlen - 6);
+					if(ai->challenge_data == NULL){
+						printf("Error! Could not allocate memory for CHAP challenge data!\n");
+						return(NULL);
+					}
+					memcpy(ai->challenge_data, data + 6, vlen - 6);
+					ai->length = vlen - 6;
+				break;
+				case '\x20':		// Authentication ID
+					ai->authid = (unsigned char)data[7];
+				break;
+				case '\x21':		// CHAP response data
+					ai->response_data = (char*)malloc(vlen - 6);
+					if(ai->response_data == NULL){
+						printf("Error! Could not allocate memory for CHAP response!\n");
+						return(NULL);
+					}
+					memcpy(ai->response_data, data + 6, vlen - 6);
+				break;	
+			}
+			return(decap(data + vlen, length - vlen, L2AVP, ai));
+		break;
 	}
 	return(NULL);
 }
@@ -180,7 +324,8 @@ void clean(auth_instance_t *ai){
 	ai->authid = 0;
 	ai->cr = CHAP_NONE;
 	ai->length = 0;
-	ai->data = NULL;
+	ai->challenge_data = NULL;
+	ai->response_data = NULL;
 	ai->username = NULL;
 }
 
@@ -220,10 +365,10 @@ puzzle_t *addpuzzle(puzzle_t *root, auth_list_item_t *challenge, auth_list_item_
 	newnode->next = NULL;
 	newnode->authid = challenge->item->authid;
 	newnode->length = challenge->item->length;
-	newnode->challenge = challenge->item->data;
-	newnode->response = response->item->data;
+	newnode->challenge = challenge->item->challenge_data;
+	newnode->response = response->item->response_data;
 	newnode->username = response->item->username;
-	newnode->password == NULL;
+	newnode->password = NULL;
 	
 	if(root == NULL) return(newnode);
 	for(current = root; current->next != NULL; current = current->next);
@@ -231,13 +376,53 @@ puzzle_t *addpuzzle(puzzle_t *root, auth_list_item_t *challenge, auth_list_item_
 	return(root);
 }
 
-auth_list_item_t *parse_pcap(FILE *capfile){
+puzzle_t *pair_up(auth_list_item_t *chaps){
+	puzzle_t			*puzzles = NULL;
+	auth_list_item_t 	*response = NULL,
+						*challenge = NULL;
+
+	// Now cycle through the responses and find their corresponding challenges
+	// This is done by working forward through the list until we find a response,
+	// then working backwards from there to find the most recent challenge that 
+	// matches that PPP session based on MAC address, S&C VLAN, PPPoE session
+	// ID and authentication ID.
+	for(response = chaps; response != NULL; response = response->next){
+		
+		if(response->item->cr == CHAP_CHALLENGE) continue;
+		if(response->item->cr == CHAP_BOTH){
+			challenge = response;
+			puzzles = addpuzzle(puzzles, challenge, response);
+			continue;
+		}
+		for(challenge = response; challenge != NULL; challenge = challenge->prev){
+			// Go through previous challenges to find one matching our response
+			if(challenge->item->cr == CHAP_CHALLENGE &&
+				memcmp(challenge->item->smac, response->item->dmac, 6) == 0 &&
+				memcmp(challenge->item->dmac, response->item->smac, 6) == 0 &&
+				challenge->item->svlan == response->item->svlan &&
+				challenge->item->cvlan == response->item->cvlan &&
+				challenge->item->pppoesid == response->item->pppoesid &&
+				challenge->item->authid == response->item->authid)
+					break;
+		}
+		// If we can't find a matching challenge then we can't do anything.
+		if(challenge == NULL) continue;
+		
+		// If we did find a match, create an entry in our list of hashes.
+		puzzles = addpuzzle(puzzles, challenge, response);
+	}
+	return(puzzles);
+}
+
+puzzle_t *parse_pcap(FILE *capfile){
 	char 				*memblock = NULL;
 	auth_list_item_t	*chaps = NULL;
 	auth_instance_t		*ai = NULL,
 						*decapai = NULL;
 	guint32				caplen = 0;
-
+	puzzle_t			*puzzles = NULL,
+						*p = NULL;
+	
 	// Start parsing the capture file:
 	rewind(capfile);
 	clearerr(capfile);
@@ -308,39 +493,8 @@ auth_list_item_t *parse_pcap(FILE *capfile){
 		}
 	}
 	free(memblock);
-	return(chaps);
-}
 
-puzzle_t *pair_up(auth_list_item_t *chaps){
-	puzzle_t			*puzzles = NULL;
-	auth_list_item_t 	*response = NULL,
-						*challenge = NULL;
-
-	// Now cycle through the responses and find their corresponding challenges
-	// This is done by working forward through the list until we find a response,
-	// then working backwards from there to find the most recent challenge that 
-	// matches that PPP session based on MAC address, S&C VLAN, PPPoE session
-	// ID and authentication ID.
-	for(response = chaps; response != NULL; response = response->next){
-		if(response->item->cr == CHAP_CHALLENGE) continue;
-		for(challenge = response; challenge != NULL; challenge = challenge->prev){
-			// Go through previous challenges to find one matching our response
-			if(challenge->item->cr == CHAP_CHALLENGE &&
-				memcmp(challenge->item->smac, response->item->dmac, 6) == 0 &&
-				memcmp(challenge->item->dmac, response->item->smac, 6) == 0 &&
-				challenge->item->svlan == response->item->svlan &&
-				challenge->item->cvlan == response->item->cvlan &&
-				challenge->item->pppoesid == response->item->pppoesid &&
-				challenge->item->authid == response->item->authid)
-					break;
-		}
-		// If we can't find a matching challenge then we can't do anything.
-		if(challenge == NULL) continue;
-		
-		// If we did find a match, create an entry in our list of hashes.
-		puzzles = addpuzzle(puzzles, challenge, response);
-	}
-	return(puzzles);
+	return(pair_up(chaps));
 }
 
 void crack(puzzle_t *puzzles, FILE *wordfile){
@@ -385,11 +539,13 @@ int main(int argc, char *argv[]){
 	// Parse our command line parameters and verify they are usable. If not, show help.
 	parameters = parseParams(argc, argv);
 	if(parameters == NULL){
-		printf("De-CHAP brute-forcer for PPPoE traffic\nVersion %s, %s\n\n", SWVERSION, SWRELEASEDATE);
+		printf("dechap: the CHAP password brute-forcer for PPPoE, RADIUS and L2TP traffic\nVersion %s, %s\n\n", SWVERSION, SWRELEASEDATE);
 		printf("Usage:\n");
 		printf("%s -c capfile -w wordfile\n\n",argv[0]);
-		printf("Where capfile is a tcpdump-style .cap file containing CHAP authentications\n");
-		printf("and wordfile is a plain text file containing password guesses.\n");
+		printf("Where capfile is a tcpdump-style .cap file containing PPPoE, RADIUS\n");
+		printf("or L2TP CHAP authentications and wordfile is a plain text file\n");
+		printf("containing password guesses. VLAN tags and MPLS labels are automatically\n");
+		printf("stripped.\n");
 		return(1);
 	}
 	
@@ -406,21 +562,12 @@ int main(int argc, char *argv[]){
 	}
 	
 	// Parse the pcap file and store any authentications found in the list:
-	chaps = parse_pcap(capfile);
-	if(chaps == NULL){
-		printf("No authentications loaded from capture.\n");
-		return(1);
-	}
+	puzzles = parse_pcap(capfile);
 	fclose(capfile);
-	
-	// Now pair up the authentication instances (challenges and responses) into
-	// "puzzles" which can brute-forced later.
-	puzzles = pair_up(chaps);
-	
 	
 	// Now we have our puzzles, let's crack some passwords.
 	if(puzzles == NULL){
-		printf("No challenge / response pairs could be generated.\n");
+		printf("No attackable authentications found.\n");
 		return(1);
 	}
 	crack(puzzles, wordfile);
