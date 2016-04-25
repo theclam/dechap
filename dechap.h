@@ -15,7 +15,9 @@
 #define L2TP '\x0b'
 #define L2AVP '\x0c'
 #define OSPFv2 '\x0d'
-#define PLAIN_MD5 '\x0e'
+#define OSPF_MD5 '\x0e'
+#define TCP '\x0f'
+#define IP_MD5 '\x10'
 
 typedef struct auth_instance_s {
 // A data structure to hold the details necessary to uniquely identify an authentication instance.

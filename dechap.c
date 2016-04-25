@@ -5,11 +5,11 @@
 
 #include "dechap.h"
 
-#define SWVERSION "v0.3 alpha"
-#define SWRELEASEDATE "September 2013"
+#define SWVERSION "v0.4 alpha"
+#define SWRELEASEDATE "October 2013"
 
 // "dechap" attempts to recover credentials from packet captures of PPPoE, RADIUS and L2TP CHAP authentications.
-// It can also now work with OSPFv2 packets :)
+// It can also now work with OSPFv2 and BGP packets :)
 // Written by Foeh Mannay
 // Please refer to http://networkbodges.blogspot.com for more information about this tool.
 // This software is released under the Modified BSD license.
@@ -55,6 +55,7 @@ auth_instance_t *decap(char *data, unsigned int length, char type, auth_instance
 // template which is populated as the various layers of encap are stripped away.
 	int chaplen = 0;
 	int vlen = 0;
+	int pos = 0;
 
 	// Some sanity checks
 	if(data == NULL) return(NULL);
@@ -188,16 +189,19 @@ auth_instance_t *decap(char *data, unsigned int length, char type, auth_instance
 			// If the protocol is IPv4 we may find some UDP RADIUS / L2TP messages
 			if(length < 20) return(NULL);
 			if(length < 4 * (data[0] & 15)) return(NULL);
+			ai->ip_ptr = data;
 			
 			if(data[9] == '\x11'){	// UDP
-				return(decap(data + (4 * (data[0] & 15)), length - (4 * (data[0] & 15)), UDP, ai));
+				return(decap(data + (4 * (data[0] & 15)), length - (4 * (unsigned char)(data[0] & 15)), UDP, ai));
 			} 
 
 			if(data[9] == '\x59'){	//OSPFv2
-				ai->ip_ptr = data;
-				return(decap(data + (4 * (data[0] & 15)), length - (4 * (data[0] & 15)), OSPFv2, ai));
+				return(decap(data + (4 * (data[0] & 15)), length - (4 * (unsigned char)(data[0] & 15)), OSPFv2, ai));
                         }
- 
+
+			if(data[9] == '\x06'){  //TCP
+			        return(decap(data + (4 * (data[0] & 15)), length - (4 * (unsigned char)(data[0] & 15)), TCP, ai));
+			} 
 			return(NULL);
 
 		break;
@@ -210,7 +214,7 @@ auth_instance_t *decap(char *data, unsigned int length, char type, auth_instance
 			if(length < (vlen + (unsigned char)data[19])) return(NULL);	// Header lies!
 			
 			// Assuming the OSPF is sane, grab a copy of the packet contents
-			ai->cr = PLAIN_MD5;
+			ai->cr = OSPF_MD5;
 			ai->challenge_data = (char*)malloc(vlen);
 			if(ai->challenge_data == NULL){
 				printf("Error! Could not allocate memory for OSPF packet data!\n");
@@ -238,6 +242,69 @@ auth_instance_t *decap(char *data, unsigned int length, char type, auth_instance
 				(unsigned char)ai->ip_ptr[15],
 				(unsigned char)data[18]);
 			return(ai);
+
+                case TCP:
+                        // If the protocol is TCP, check for MD5 signature (a la RFC 2385 for BGP)
+                        if(length < 40) return(NULL);					// Not enough frame left for a signature
+
+                        if((unsigned char)(data[12] & '\xf0') < '\xa0' ) return(NULL);  // Header too short for MD5 signature
+
+                        for(pos=20; data[pos] != 0; pos = pos + data[pos+1]){		// Cycle through the options, looking for
+                                if(data[pos] == 19){    				// Option kind 19 for TCP MD5 signature
+
+                                        vlen = length - ((unsigned char)(data[12] & '\xf0') / 4);		// data length
+                                        
+					// Save a copy of the pseudoheader
+					ai->length = 12 + 20 + vlen;
+					ai->challenge_data = (char*)malloc(ai->length);
+					if(ai->challenge_data == NULL){
+						printf("Error! Could not allocate memory for hash input!\n");
+						return(NULL);
+					}
+												// As per RFC2385, the pseudoheader consists of:
+					memcpy(ai->challenge_data, ai->ip_ptr + 12, 8);		// Source and destination IP,
+					ai->challenge_data[8] = 0;				// zero padded...
+                                        ai->challenge_data[9] = ai->ip_ptr[9];			// ... protocol number
+                                        ai->challenge_data[10] = (unsigned char)(length / 256);	// and segment length.
+                                        ai->challenge_data[11] = (unsigned char)(length % 256);
+                                        memcpy(ai->challenge_data+12, data, 16);		// We also add the TCP header...
+                                        memcpy(ai->challenge_data+28, "\x00\x00\x00\x00", 4);	// ... with a checksum of zero assumed
+                                        memcpy(ai->challenge_data+32, data + ((unsigned char)(data[12] & '\xf0') / 4), vlen);	// and the segment data
+
+		                	// Save a copy of the provided signature hash
+	                       		ai->response_data = (char*)malloc(16);
+	                        	if(ai->response_data == NULL){
+	                                	printf("Error! Could not allocate memory for hash!\n");
+	                                	return(NULL);
+	                        	}
+					// Build a descriptive username
+					memcpy(ai->response_data, data + pos + 2, 16);
+					ai->username = (char*)malloc(45);
+					if(ai->username == NULL){
+                                		printf("Error! Could not allocate memory for hostname!\n");
+                                		return(NULL);
+                        		}
+                        		// Set the username to the source and destination IPs
+                        		snprintf(ai->username, 39, "TCP from %u.%u.%u.%u to %u.%u.%u.%u",
+                                		(unsigned char)ai->ip_ptr[12],
+                                		(unsigned char)ai->ip_ptr[13],
+                        		        (unsigned char)ai->ip_ptr[14],
+                	        	        (unsigned char)ai->ip_ptr[15],
+                                                (unsigned char)ai->ip_ptr[16],
+                                                (unsigned char)ai->ip_ptr[17],
+                                                (unsigned char)ai->ip_ptr[18],
+                                                (unsigned char)ai->ip_ptr[19]);
+
+                                        // Set the type to attack
+                                        ai->cr = IP_MD5;
+
+	                        	return(ai);
+				}
+                        }
+
+                        return(NULL);
+
+                break;
 
 		case UDP:
 			// If the protocol is UDP, check for RADIUS / L2TP port numbers
@@ -443,9 +510,14 @@ puzzle_t *pair_up(auth_list_item_t *chaps){
 	// ID and authentication ID.
 	for(response = chaps; response != NULL; response = response->next){
 		
-		if(response->item->cr == PLAIN_MD5){
+		if(response->item->cr == OSPF_MD5){
 			challenge = response;
-			puzzles = addpuzzle(puzzles, challenge, response, PLAIN_MD5);
+			puzzles = addpuzzle(puzzles, challenge, response, OSPF_MD5);
+			continue;
+		}
+		if(response->item->cr == IP_MD5){
+			challenge = response;
+			puzzles = addpuzzle(puzzles, challenge, response, IP_MD5);
 			continue;
 		}
 		if(response->item->cr == CHAP_CHALLENGE) continue;
@@ -586,20 +658,30 @@ void crack(puzzle_t *puzzles, FILE *wordfile){
 					currentpuzzle->password = strdup(password);
 					break;
 				}
-			} else if(currentpuzzle->type == PLAIN_MD5){
+			} else if(currentpuzzle->type == OSPF_MD5){
 				// Hash is run against the packet contents, plus a zero padded password field of exactly 16 bytes length
 				memcpy(base, currentpuzzle->challenge, currentpuzzle->length);
 				memcpy(base+currentpuzzle->length, "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00", 16);
 				strcpy(base+currentpuzzle->length, password);
 				MD5(base, 16 + currentpuzzle->length, hash);
 				if(memcmp(hash, currentpuzzle->response, 16) == 0){
-					printf("Found password \"%s\" for user %s.\n", password, currentpuzzle->username);
+					printf("Found password \"%s\" for %s.\n", password, currentpuzzle->username);
+					currentpuzzle->password = strdup(password);
+					break;
+				}
+			} else if(currentpuzzle->type == IP_MD5){
+				// Hash is run against the pseudoheader and segment contents, plus a variable length password field
+				memcpy(base, currentpuzzle->challenge, currentpuzzle->length);
+				strcpy(base+currentpuzzle->length, password);
+				MD5(base, currentpuzzle->length + pwlen -1, hash);
+				if(memcmp(hash, currentpuzzle->response, 16) == 0){
+					printf("Found password \"%s\" for %s.\n", password, currentpuzzle->username);
 					currentpuzzle->password = strdup(password);
 					break;
 				}
 			}
 		}
-		if(currentpuzzle->password == NULL) printf("Unable to find a password for user %s.\n", currentpuzzle->username);
+		if(currentpuzzle->password == NULL) printf("Unable to find a password for %s.\n", currentpuzzle->username);
 		free(base);
 	}
 }
@@ -615,13 +697,13 @@ int main(int argc, char *argv[]){
 	// Parse our command line parameters and verify they are usable. If not, show help.
 	parameters = parseParams(argc, argv);
 	if(parameters == NULL){
-		printf("dechap: the CHAP password brute-forcer for PPPoE, RADIUS and L2TP traffic\nVersion %s, %s\n\n", SWVERSION, SWRELEASEDATE);
+		printf("dechap: a dictionary attack for captured PPPoE, RADIUS, L2TP, OSPF and BGP traffic.\nVersion %s, %s\n\n", SWVERSION, SWRELEASEDATE);
 		printf("Usage:\n");
 		printf("%s -c capfile -w wordfile\n\n",argv[0]);
 		printf("Where capfile is a tcpdump-style .cap file containing PPPoE, RADIUS\n");
-		printf("or L2TP CHAP authentications and wordfile is a plain text file\n");
-		printf("containing password guesses. VLAN tags and MPLS labels are automatically\n");
-		printf("stripped.\n");
+		printf("or L2TP CHAP authentications or MD5 authenticated OSPF / BGP packets and\n");
+		printf("wordfile is a plain text file containing password guesses. VLAN tags\n");
+		printf("and MPLS labels are automatically stripped.\n");
 		return(1);
 	}
 	
