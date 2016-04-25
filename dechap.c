@@ -704,14 +704,13 @@ int main(int argc, char **argv)
     **/
     parameters = parseParams(argc, argv);
     if(parameters == NULL){
-        printf("%s: Bruteforce attack for captured PPPoE, RADIUS, L2TP, OSPF and BGP traffic.\n", argv[0]);
+        printf("\nBruteforce attack for captured PPPoE, RADIUS, L2TP, OSPF and BGP traffic.\n");
         printf("Version %s, %s\n\n", SWVERSION, SWRELEASEDATE);
-        printf("Usage:\n");
-        printf("%s -c capfile -w wordfile\n\n",argv[0]);
+        printf("Usage: %s -c capfile.pcap -w wordlist.txt\n\n", argv[0]);
         printf("Where capfile is a tcpdump-style .cap file containing PPPoE, RADIUS\n");
         printf("or L2TP CHAP authentications or MD5 authenticated OSPF / BGP packets and\n");
         printf("wordfile is a plain text file containing password guesses. VLAN tags\n");
-        printf("and MPLS labels are automatically stripped.\n");
+        printf("and MPLS labels are automatically stripped.\n\n");
         return(1);
     }
     
