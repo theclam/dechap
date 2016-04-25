@@ -7,7 +7,7 @@
 #include "dechap.h"
 
 #define SWVERSION "v0.5 alpha"
-#define SWRELEASEDATE "October 2016"
+#define SWRELEASEDATE "April 2016"
 
 // "dechap" attempts to recover credentials from packet captures of PPPoE, RADIUS and L2TP CHAP authentications.
 // It can also now work with OSPFv2 and BGP packets :)
